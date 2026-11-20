@@ -1,0 +1,89 @@
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        type: string
+        required: true
+      sha:
+        type: string
+        required: true
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.repo }}
+          permission-contents: read
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: project
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: ${{ vars.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: ${{ inputs.dry-run }}
+
+      - name: Build
+        working-directory: project
+        run: nix build .#default --fallback
+
+  push-branch:
+    needs: cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.repo }}
+          permission-contents: write
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: project
+          fetch-depth: 0
+
+      - name: Point the cachix branch at this commit
+        working-directory: project
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          rev=$(git rev-parse HEAD)
+          default=$(git ls-remote --symref origin HEAD | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2 }')
+          git merge-base --is-ancestor "$rev" "origin/$default" || exit 0
+          git merge-base --is-ancestor "$rev" origin/cachix 2>/dev/null && exit 0
+          args=()
+          [ "$DRY_RUN" = true ] && args+=(--dry-run)
+          git push "${args[@]}" origin "$rev":refs/heads/cachix --force

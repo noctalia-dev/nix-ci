@@ -1,0 +1,108 @@
+name: update
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        type: string
+        required: true
+      inputs:
+        type: string
+        default: ""
+      expect-rev:
+        type: string
+        default: ""
+      dry-run:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      repo:
+        type: string
+        required: true
+      inputs:
+        type: string
+        default: ""
+      expect-rev:
+        type: string
+        default: ""
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: update-${{ inputs.repo }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Check the inputs
+        env:
+          REPO: ${{ inputs.repo }}
+          INPUTS: ${{ inputs.inputs }}
+        run: |
+          if ! jq -e --arg r "$REPO" 'any(.[]; .repo == $r)' repos.json > /dev/null; then
+            echo "$REPO is not listed in repos.json" >&2
+            exit 1
+          fi
+          if [[ ! "$INPUTS" =~ ^[A-Za-z0-9_.\ -]*$ || "$INPUTS" =~ (^|\ )- ]]; then
+            echo "invalid input names: $INPUTS" >&2
+            exit 1
+          fi
+
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.repo }}
+          permission-contents: write
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.repo }}
+          token: ${{ steps.app.outputs.token }}
+          path: project
+
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+
+      - id: update
+        name: Update flake.lock
+        working-directory: project
+        env:
+          INPUTS: ${{ inputs.inputs }}
+          EXPECT_REV: ${{ inputs.expect-rev }}
+        run: |
+          # shellcheck disable=SC2086
+          nix flake update $INPUTS
+          [ -n "$EXPECT_REV" ] || exit 0
+          for name in $INPUTS; do
+            rev=$(jq -r --arg n "$name" '(.nodes.root.inputs[$n] | select(type == "string")) as $k | .nodes[$k].locked.rev // ""' flake.lock)
+            if [ "$rev" != "$EXPECT_REV" ]; then
+              echo "$name resolved to ${rev:-nothing}, not $EXPECT_REV: a newer commit has its own run, discarding"
+              git checkout -- flake.lock
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+      - name: Show what would have been committed
+        if: ${{ inputs.dry-run && steps.update.outputs.skip != 'true' }}
+        working-directory: project
+        run: |
+          git diff --stat -- flake.lock
+          echo "dry run: nothing committed"
+
+      - if: ${{ !inputs.dry-run && steps.update.outputs.skip != 'true' }}
+        uses: stefanzweifel/git-auto-commit-action@d0b01107b5db882071f96de5dd4b54961ea93f4c # v7.2.1
+        with:
+          repository: project
+          commit_message: "chore(flake): update flake.lock"
