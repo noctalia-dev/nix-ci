@@ -1,1 +1,7 @@
-[]
+[
+  { "repo": "noctalia", "watch": "glibc" },
+  { "repo": "noctalia-greeter", "watch": "glibc" },
+  { "repo": "umbriel", "watch": "glibc" },
+  { "repo": "xdg-desktop-portal-umbriel" },
+  { "repo": "luciole" }
+]
