@@ -47,7 +47,60 @@ async function appJwt(appId, pem) {
   return `${head}.${claims}.${b64url(sig)}`;
 }
 
+const gh = (api, path, token, init = {}) =>
+  fetch(`${api}${path}`, {
+    ...init,
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "user-agent": "nix-ci-receiver",
+      "x-github-api-version": "2022-11-28",
+      ...init.headers,
+    },
+  });
+
+async function dispatch(env, api, owner, workflow, inputs) {
+  const jwt = await appJwt(env.APP_ID, env.APP_PRIVATE_KEY);
+  const inst = await gh(
+    api,
+    `/repos/${owner}/${env.CENTRAL_REPO}/installation`,
+    jwt,
+  );
+  if (!inst.ok) return `installation lookup failed: ${inst.status}`;
+  const tok = await gh(
+    api,
+    `/app/installations/${(await inst.json()).id}/access_tokens`,
+    jwt,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        repositories: [env.CENTRAL_REPO],
+        permissions: { actions: "write" },
+      }),
+    },
+  );
+  if (!tok.ok) return `token failed: ${tok.status}`;
+  const { token } = await tok.json();
+
+  const d = await gh(
+    api,
+    `/repos/${owner}/${env.CENTRAL_REPO}/actions/workflows/${workflow}/dispatches`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({ ref: "main", inputs }),
+    },
+  );
+  if (d.status !== 204) return `dispatch failed: ${d.status}`;
+  return null;
+}
+
 export default {
+  async scheduled(_event, env, _ctx, api = "https://api.github.com") {
+    const err = await dispatch(env, api, env.CENTRAL_OWNER, "drift.yml", {});
+    if (err) throw new Error(err);
+  },
+
   async fetch(req, env, _ctx, api = "https://api.github.com") {
     if (req.method !== "POST")
       return new Response("method not allowed", { status: 405 });
@@ -75,52 +128,11 @@ export default {
     if (repo === env.CENTRAL_REPO)
       return new Response("central repo", { status: 202 });
 
-    const gh = (path, token, init = {}) =>
-      fetch(`${api}${path}`, {
-        ...init,
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "user-agent": "nix-ci-receiver",
-          "x-github-api-version": "2022-11-28",
-          ...init.headers,
-        },
-      });
-
-    const jwt = await appJwt(env.APP_ID, env.APP_PRIVATE_KEY);
-    const inst = await gh(
-      `/repos/${owner}/${env.CENTRAL_REPO}/installation`,
-      jwt,
-    );
-    if (!inst.ok)
-      return new Response(`installation lookup failed: ${inst.status}`, {
-        status: 502,
-      });
-    const tok = await gh(
-      `/app/installations/${(await inst.json()).id}/access_tokens`,
-      jwt,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          repositories: [env.CENTRAL_REPO],
-          permissions: { actions: "write" },
-        }),
-      },
-    );
-    if (!tok.ok)
-      return new Response(`token failed: ${tok.status}`, { status: 502 });
-    const { token } = await tok.json();
-
-    const d = await gh(
-      `/repos/${owner}/${env.CENTRAL_REPO}/actions/workflows/push.yml/dispatches`,
-      token,
-      {
-        method: "POST",
-        body: JSON.stringify({ ref: "main", inputs: { repo, sha: p.after } }),
-      },
-    );
-    if (d.status !== 204)
-      return new Response(`dispatch failed: ${d.status}`, { status: 502 });
+    const err = await dispatch(env, api, owner, "push.yml", {
+      repo,
+      sha: p.after,
+    });
+    if (err) return new Response(err, { status: 502 });
     return new Response("dispatched", { status: 202 });
   },
 };
