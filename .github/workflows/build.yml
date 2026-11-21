@@ -83,7 +83,16 @@ jobs:
           rev=$(git rev-parse HEAD)
           default=$(git ls-remote --symref origin HEAD | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2 }')
           git merge-base --is-ancestor "$rev" "origin/$default" || exit 0
-          git merge-base --is-ancestor "$rev" origin/cachix 2>/dev/null && exit 0
           args=()
           [ "$DRY_RUN" = true ] && args+=(--dry-run)
-          git push "${args[@]}" origin "$rev":refs/heads/cachix --force
+          for attempt in 1 2 3 4 5; do
+            if git fetch --quiet origin cachix 2>/dev/null; then
+              tip=$(git rev-parse FETCH_HEAD)
+              git merge-base --is-ancestor "$rev" "$tip" && exit 0
+            else
+              tip=""
+            fi
+            git push "${args[@]}" --force-with-lease="cachix:$tip" origin "$rev":refs/heads/cachix && exit 0
+            echo "cachix branch moved while pushing (attempt $attempt), retrying"
+          done
+          exit 1
