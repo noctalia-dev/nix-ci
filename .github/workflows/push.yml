@@ -77,9 +77,6 @@ jobs:
   build:
     needs: route
     if: needs.route.outputs.build == 'true'
-    concurrency:
-      group: build-${{ inputs.repo }}
-      cancel-in-progress: false
     uses: ./.github/workflows/build.yml
     with:
       repo: ${{ inputs.repo }}
